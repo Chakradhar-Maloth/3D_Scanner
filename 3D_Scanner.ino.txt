@@ -1,0 +1,138 @@
+#include <Wire.h>
+#include <Adafruit_VL53L0X.h>
+#include <AccelStepper.h>
+#include <Arduino.h>
+#include <math.h>
+#include <SPI.h>
+#include <SD.h>
+
+// Define the pins for the stepper motors
+#define MOTOR1_IN1_PIN 9
+#define MOTOR1_IN2_PIN 10
+#define MOTOR1_IN3_PIN 11
+#define MOTOR2_IN1_PIN 2
+#define MOTOR2_IN2_PIN 3
+#define MOTOR2_IN3_PIN 4
+#define MOTOR2_IN4_PIN 5
+#define SD_CS_PIN 10  // SD card chip select pin (shared with MOTOR1_IN2, adjust if needed)
+
+// Define the steps per revolution for the stepper motors
+#define STEPS_PER_REV 2048  // 28BYJ-48 has 2048 steps per revolution with microstepping
+
+// Define the maximum speed and acceleration for the stepper motors
+#define MAX_SPEED 500.0
+#define ACCELERATION 1000.0
+
+// Create instances for the stepper motors
+AccelStepper motor1(AccelStepper::FULL4WIRE, MOTOR1_IN1_PIN, MOTOR1_IN2_PIN, MOTOR1_IN3_PIN);
+AccelStepper motor2(AccelStepper::FULL4WIRE, MOTOR2_IN1_PIN, MOTOR2_IN2_PIN, MOTOR2_IN3_PIN, MOTOR2_IN4_PIN);
+
+// Create instance for LIDAR sensor
+Adafruit_VL53L0X lox;
+
+// Global variables
+float currentAngle = 0;  // Current angle of rotation
+float currentZ = 0;      // Current z-coordinate (elevation)
+unsigned long previousMillisObject = 0;
+unsigned long previousMillisLidar = 0;
+float ANGLE_INCREMENT = 3;  // Angle increment for each iteration
+
+void setup() {
+  // Initialize serial communication
+  Serial.begin(9600);
+
+  // Initialize LIDAR sensor
+  Wire.begin();
+  if (!lox.begin()) {
+    Serial.println(F("Failed to boot VL53L0X"));
+    while (1);
+  }
+
+  // Set the maximum speed and acceleration for the object rotation stepper motor
+  motor1.setMaxSpeed(MAX_SPEED);
+  motor1.setAcceleration(ACCELERATION);
+
+  // Set the maximum speed and acceleration for the elevation stepper motor
+  motor2.setMaxSpeed(MAX_SPEED);
+  motor2.setAcceleration(ACCELERATION);
+  
+  // Initialize SD card
+  if (!SD.begin(SD_CS_PIN)) {
+    Serial.println(F("SD card initialization failed!"));
+    while (1);
+  }
+  Serial.println(F("SD card initialized."));
+}
+
+void loop() {
+  unsigned long currentMillis = millis();
+  float elapsedTime = (currentMillis - previousMillisObject) / 1000.0;  // Elapsed time in seconds
+
+  // Rotate object motor continuously
+  motor1.moveTo(STEPS_PER_REV);
+  while (motor1.distanceToGo() != 0) {
+    motor1.run();
+  }
+
+  // Delay 10ms
+  delay(10);
+
+  // Rotate elevation motor for 9.5 degrees
+  motor2.moveTo(STEPS_PER_REV / 18);  // 9.5 degrees (360/18 = 20 steps per degree)
+  while (motor2.distanceToGo() != 0) {
+    motor2.run();
+  }
+
+  // Wait until elevation motor completes its rotation
+  while (motor2.distanceToGo() != 0) {
+    motor2.run();
+  }
+
+  // Collect data and increment angle for every 35ms
+  if (currentMillis - previousMillisLidar >= 35) {
+    previousMillisLidar = currentMillis;
+    currentAngle += ANGLE_INCREMENT;
+    collectAndPrintCoordinates();
+  }
+
+  // Delay 10ms before repeating the process
+  delay(10);
+}
+
+void collectAndPrintCoordinates() {
+  // Collect LIDAR data and print Cartesian coordinates
+  VL53L0X_RangingMeasurementData_t measure;
+  lox.rangingTest(&measure, false);
+
+  float distance_mm = measure.RangeMilliMeter;
+
+  // Check if distance measurement is 150mm
+  if (distance_mm < 105) {
+    // Calculate coordinates
+    float x = (105 - distance_mm) * sin(currentAngle * PI / 180.0);
+    float y = (105 - distance_mm) * cos(currentAngle * PI / 180.0);
+
+    // Print coordinates
+    Serial.print(F("X (mm): "));
+    Serial.print(x);
+    Serial.print(F(", Y (mm): "));
+    Serial.println(y);
+
+    // Save to SD card
+    File dataFile = SD.open("scan.txt", FILE_APPEND);
+    if (dataFile) {
+      dataFile.print(currentAngle);
+      dataFile.print(",");
+      dataFile.print(currentZ);
+      dataFile.print(",");
+      dataFile.print(x);
+      dataFile.print(",");
+      dataFile.print(y);
+      dataFile.print(",");
+      dataFile.println(distance_mm);
+      dataFile.close();
+    } else {
+      Serial.println(F("Error opening scan.txt!"));
+    }
+  }
+}
